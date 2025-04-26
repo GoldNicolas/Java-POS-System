@@ -2,7 +2,7 @@
 
 Developers:
  - `Nicolas Guerra`
- - `Saud`
+ - `Saud Manganhar`
 
 ## Folder Structure
 
