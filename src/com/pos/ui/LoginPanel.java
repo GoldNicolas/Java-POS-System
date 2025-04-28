@@ -50,7 +50,7 @@ public class LoginPanel extends JPanel {
         loginButton = new JButton("Login");
          loginButton.setFont(new Font("Arial", Font.BOLD, 14));
         loginButton.setBackground(new Color(70, 130, 180)); // Steel blue
-        loginButton.setForeground(Color.WHITE);
+        loginButton.setForeground(Color.BLACK);
         loginButton.setFocusPainted(false); // Remove focus border
         gbc.gridx = 0;
         gbc.gridy = 2;
