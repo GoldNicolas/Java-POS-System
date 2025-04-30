@@ -45,7 +45,8 @@ public class InventoryService {
         inventory.addItem(new Item("BC004", "Bread Loaf", 3.00, 8)); // Low stock item
         inventory.addItem(new Item("BC005", "Milk Carton", 1.80, 15));
         inventory.addItem(new Item("BC006", "Coffee Beans", 8.99, 0)); // Out of stock item
-
+        inventory.addItem(new Item("012546011075", "Trident Gum", 2.00, 5));
+        
         // Optional: Log initial stock warnings at startup for visibility
         System.out.println("--- Initial Inventory Stock Check ---");
         List<Item> lowStock = getLowStockItems();
