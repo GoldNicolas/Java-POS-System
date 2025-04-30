@@ -40,6 +40,16 @@ POSSystem/
 │               ├── LoginPanel.java        # Login screen (JPanel)
 │               └── PosPanel.java          # Main POS interface (JPanel)
 ```
-## Github
 
-## Contact
+## Tech Stack
+
+- Java SE 17
+- Swing for GUI
+
+## Features
+
+1. **User Authentication**: Login system with different roles (Manager, Cashier).
+2. **Inventory Management**: Add, remove, and update items in the inventory.
+3. **Sales Transactions**: Process sales and returns with transaction receipts.
+4. **UI**: User-friendly interface for easy navigation.
+
