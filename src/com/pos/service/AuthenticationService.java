@@ -15,19 +15,18 @@ public class AuthenticationService {
     public AuthenticationService() {
         employeeDatabase = new HashMap<>();
         // Add some sample employees
-        employeeDatabase.put("MGR001", new Manager("MGR001", "Alice Manager"));
-        employeeDatabase.put("CSH001", new Cashier("CSH001", "Bob Cashier"));
-        employeeDatabase.put("CSH002", new Cashier("CSH002", "Charlie Cashier"));
+        employeeDatabase.put("MGR001", new Manager("MGR001", "Nick Manager"));
+        employeeDatabase.put("CSH001", new Cashier("CSH001", "Saud Cashier"));
     }
 
     public Optional<Employee> login(String employeeId) {
         return Optional.ofNullable(employeeDatabase.get(employeeId));
     }
 
-     // Method to add employees dynamically if needed (e.g., for testing or admin features)
-     public void addEmployee(Employee employee) {
-         if (employee != null && !employeeDatabase.containsKey(employee.getEmployeeId())) {
-             employeeDatabase.put(employee.getEmployeeId(), employee);
-         }
-     }
+    // Method to add employees dynamically if needed (e.g., for testing or admin features)
+    public void addEmployee(Employee employee) {
+        if (employee != null && !employeeDatabase.containsKey(employee.getEmployeeId())) {
+            employeeDatabase.put(employee.getEmployeeId(), employee);
+        }
+    }
 }

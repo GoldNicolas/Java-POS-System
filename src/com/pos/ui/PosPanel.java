@@ -14,7 +14,6 @@ import java.awt.event.ActionListener;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
-// No need to import Collectors explicitly if only used within stream()
 
 public class PosPanel extends JPanel {
 
@@ -97,7 +96,7 @@ public class PosPanel extends JPanel {
         add(centerPanel, BorderLayout.CENTER);
 
 
-         // --- Right Panel (Actions & Total) ---
+        // --- Right Panel (Actions & Total) ---
         JPanel rightPanel = new JPanel();
         rightPanel.setLayout(new BoxLayout(rightPanel, BoxLayout.Y_AXIS)); // Vertical alignment
         rightPanel.setBorder(new EmptyBorder(0, 10, 0, 0)); // Left padding
@@ -216,10 +215,15 @@ public class PosPanel extends JPanel {
                  // Combine quantities
                  int newQuantity = existingTransItem.getQuantity() + transItem.getQuantity();
 
-                 // For inventory-managed items, check stock. For temporary items, assume available.
-                 Optional<Item> inventoryItemOpt = mainFrame.getInventoryService().findItem(transItem.getItem().getBarcode());
-                 // If item is NOT in inventory (it's temporary), treat stock as sufficient for this transaction
-                 int availableStock = inventoryItemOpt.map(Item::getQuantityInStock).orElse(Integer.MAX_VALUE);
+                 // Check stock ONLY if it's a main inventory item
+                 boolean isInventoryItem = mainFrame.getInventoryService().isInventoryItem(transItem.getItem().getBarcode());
+                 int availableStock = Integer.MAX_VALUE; // Assume infinite for temporary items
+
+                 if (isInventoryItem) {
+                      // Re-fetch from inventory to get current stock count just before adding
+                      Optional<Item> inventoryItemOpt = mainFrame.getInventoryService().findItem(transItem.getItem().getBarcode());
+                      availableStock = inventoryItemOpt.map(Item::getQuantityInStock).orElse(0); // Default to 0 if somehow gone
+                 }
 
                  if (availableStock >= newQuantity) {
                      // Create a new TransactionItem reflecting the updated quantity
@@ -272,101 +276,103 @@ public class PosPanel extends JPanel {
         }
 
          InventoryService invService = mainFrame.getInventoryService();
+         // Use the modified findItem which checks both inventory and temporary storage
          Optional<Item> itemOpt = invService.findItem(barcode);
 
          if (itemOpt.isPresent()) {
-             // --- LOGIC FOR ITEM FOUND IN INVENTORY ---
+             // --- ITEM FOUND (EITHER IN INVENTORY OR TEMPORARILY) ---
              Item item = itemOpt.get();
-             if (item.getQuantityInStock() > 0) {
-                 // Add quantity 1 (addItemToTable handles increments if already present)
-                 int quantity = 1;
-                 TransactionItem transItem = new TransactionItem(item, quantity);
-                 addItemToTable(transItem); // Add/Update item in the list/table
+             boolean isInventoryItem = invService.isInventoryItem(barcode); // Check if it's from main inventory
+
+             if (isInventoryItem) {
+                 // It's an inventory item, check stock
+                 if (item.getQuantityInStock() > 0) {
+                     // Add quantity 1 (addItemToTable handles increments if already present)
+                     TransactionItem transItem = new TransactionItem(item, 1);
+                     addItemToTable(transItem); // Add/Update item in the list/table
+                 } else {
+                      JOptionPane.showMessageDialog(this,
+                         "Item '" + item.getName() + "' (ID: " + barcode + ") is out of stock.",
+                         "Stock Error", JOptionPane.ERROR_MESSAGE);
+                 }
              } else {
-                  JOptionPane.showMessageDialog(this,
-                     "Item '" + item.getName() + "' (ID: " + barcode + ") is out of stock.",
-                     "Stock Error", JOptionPane.ERROR_MESSAGE);
+                 // It's a temporary item found in the session store, no stock check needed
+                 System.out.println("Found previously added item: " + barcode);
+                 TransactionItem transItem = new TransactionItem(item, 1);
+                 addItemToTable(transItem); // Add/Update item in the list/table
              }
-             // --- END OF INVENTORY ITEM LOGIC ---
+             // --- END OF ITEM FOUND LOGIC ---
+
          } else {
-            // --- LOGIC FOR ITEM *NOT* FOUND IN INVENTORY ---
+            // --- ITEM *NOT* FOUND ANYWHERE (INVENTORY OR TEMPORARY STORE) ---
+            // Ask to add as a new temporary item for the session
+            int choice = JOptionPane.showConfirmDialog(this,
+                    "Item with barcode '" + barcode + "' not found in inventory.\nDo you want to add it to sale?",
+                    "Add New Item?",
+                    JOptionPane.YES_NO_OPTION,
+                    JOptionPane.QUESTION_MESSAGE);
 
-            // Step 1: Check if this barcode exists in the *current transaction* list (i.e., was added temporarily already)
-            Optional<TransactionItem> existingTempItemOpt = Optional.empty();
-            for (TransactionItem currentItem : currentTransactionItems) {
-                if (currentItem.getItem().getBarcode().equals(barcode)) {
-                    existingTempItemOpt = Optional.of(currentItem);
-                    break;
+            if (choice == JOptionPane.YES_OPTION) {
+                // --- Get Item Details from User ---
+                String name = "";
+                while (name.isEmpty()) {
+                    name = JOptionPane.showInputDialog(this, "Enter name for new item (Barcode: " + barcode + "):");
+                    if (name == null) { // User cancelled name input
+                        barcodeInput.setText("");
+                        barcodeInput.requestFocusInWindow();
+                        return; // Cancelled adding temporary item
+                    }
+                    name = name.trim();
+                    if (name.isEmpty()) {
+                        JOptionPane.showMessageDialog(this, "Item name cannot be empty.", "Input Error", JOptionPane.WARNING_MESSAGE);
+                    }
                 }
-            }
 
-            if (existingTempItemOpt.isPresent()) {
-                // Step 2: Found in current transaction - just add one more unit
-                System.out.println("Recognized existing temporary item: " + barcode); // Console log for confirmation
-                TransactionItem existingTempItem = existingTempItemOpt.get();
-                // Create a new TransactionItem with quantity 1, using the *same underlying Item object*
-                TransactionItem itemToAddAgain = new TransactionItem(existingTempItem.getItem(), 1);
-                addItemToTable(itemToAddAgain); // addItemToTable will handle quantity update
+                double price = -1.0;
+                while (price < 0) { // Loop until valid price or cancellation
+                    String priceStr = JOptionPane.showInputDialog(this, "Enter price for '" + name + "':");
+                    if (priceStr == null) { // User cancelled price input
+                        barcodeInput.setText("");
+                        barcodeInput.requestFocusInWindow();
+                        return; // Cancelled adding temporary item
+                    }
+                    try {
+                        price = Double.parseDouble(priceStr.trim());
+                        if (price < 0) {
+                            JOptionPane.showMessageDialog(this, "Price cannot be negative. Please enter a valid price.", "Input Error", JOptionPane.WARNING_MESSAGE);
+                        }
+                    } catch (NumberFormatException nfe) {
+                        JOptionPane.showMessageDialog(this, "Invalid price format. Please enter a number (e.g., 4.99).", "Input Error", JOptionPane.WARNING_MESSAGE);
+                        price = -1.0; // Reset price to ensure loop continues
+                    }
+                }
+
+                // --- Create Temporary Item and add to InventoryService's temporary store ---
+                // Use quantity 0 for the Item itself, as stock isn't tracked.
+                Item tempItem = new Item(barcode, name, price, 0);
+                try {
+                    invService.addTemporaryItem(tempItem); // <<<< STORE PERSISTENTLY FOR SESSION
+                } catch (IllegalArgumentException ex) {
+                    // Handle potential errors from addTemporaryItem, e.g., conflict with inventory barcode if that check was enabled
+                    JOptionPane.showMessageDialog(this, "Error adding temporary item: " + ex.getMessage(), "Error", JOptionPane.ERROR_MESSAGE);
+                    barcodeInput.setText("");
+                    barcodeInput.requestFocusInWindow();
+                    return;
+                }
+
+
+                // --- Create TransactionItem and Add to Current Sale Table ---
+                TransactionItem transItem = new TransactionItem(tempItem, 1); // Add quantity 1 to the sale
+                addItemToTable(transItem); // Add to the visual table/list
+
+                JOptionPane.showMessageDialog(this, "Temporary item '" + name + "' added for this session.", "Item Added Temporarily", JOptionPane.INFORMATION_MESSAGE);
 
             } else {
-                // Step 3: Not found anywhere (inventory or current sale) - Ask to add as new temporary item
-                int choice = JOptionPane.showConfirmDialog(this,
-                        "Item with barcode '" + barcode + "' not found.\nDo you want to add it temporarily for THIS SALE ONLY?",
-                        "Add New Temporary Item?",
-                        JOptionPane.YES_NO_OPTION,
-                        JOptionPane.QUESTION_MESSAGE);
-
-                if (choice == JOptionPane.YES_OPTION) {
-                    // --- Get Item Details from User ---
-                    String name = "";
-                    while (name.isEmpty()) {
-                        name = JOptionPane.showInputDialog(this, "Enter name for new item (Barcode: " + barcode + "):");
-                        if (name == null) { // User cancelled name input
-                            barcodeInput.setText("");
-                            barcodeInput.requestFocusInWindow();
-                            return; // Cancelled adding temporary item
-                        }
-                        name = name.trim();
-                        if (name.isEmpty()) {
-                            JOptionPane.showMessageDialog(this, "Item name cannot be empty.", "Input Error", JOptionPane.WARNING_MESSAGE);
-                        }
-                    }
-
-                    double price = -1.0;
-                    while (price < 0) { // Loop until valid price or cancellation
-                        String priceStr = JOptionPane.showInputDialog(this, "Enter price for '" + name + "':");
-                        if (priceStr == null) { // User cancelled price input
-                            barcodeInput.setText("");
-                            barcodeInput.requestFocusInWindow();
-                            return; // Cancelled adding temporary item
-                        }
-                        try {
-                            price = Double.parseDouble(priceStr.trim());
-                            if (price < 0) {
-                                JOptionPane.showMessageDialog(this, "Price cannot be negative. Please enter a valid price.", "Input Error", JOptionPane.WARNING_MESSAGE);
-                            }
-                        } catch (NumberFormatException nfe) {
-                            JOptionPane.showMessageDialog(this, "Invalid price format. Please enter a number (e.g., 4.99).", "Input Error", JOptionPane.WARNING_MESSAGE);
-                            price = -1.0; // Reset price to ensure loop continues
-                        }
-                    }
-
-                    // --- Create Temporary Item and TransactionItem ---
-                    Item tempItem = new Item(barcode, name, price, 1); // Initial pseudo-stock is 1
-                    TransactionItem transItem = new TransactionItem(tempItem, 1); // Add quantity 1
-
-                    // --- Add to Current Sale ---
-                    addItemToTable(transItem);
-
-                    JOptionPane.showMessageDialog(this, "Temporary item '" + name + "' added to the current sale.", "Item Added Temporarily", JOptionPane.INFORMATION_MESSAGE);
-
-                } else {
-                    // User chose NO to adding the temporary item
-                    JOptionPane.showMessageDialog(this,
-                       "Item with barcode '" + barcode + "' not found and was not added.",
-                       "Lookup Error",
-                       JOptionPane.ERROR_MESSAGE);
-                }
+                // User chose NO to adding the temporary item
+                JOptionPane.showMessageDialog(this,
+                   "Item with barcode '" + barcode + "' not found and was not added.",
+                   "Lookup Error",
+                   JOptionPane.ERROR_MESSAGE);
             }
              // --- END OF ITEM NOT FOUND LOGIC ---
          }
@@ -392,8 +398,8 @@ public class PosPanel extends JPanel {
 
          TransactionService transService = mainFrame.getTransactionService();
          try {
-             // Pass a copy of the list. processSale will check stock for items found in InventoryService.
-             // Temporary items in the list will bypass that specific stock check.
+             // processSale logic in TransactionService already handles not decrementing stock
+             // for items not found in main inventory (which now includes our temporary items)
              Receipt receipt = transService.processSale(new ArrayList<>(currentTransactionItems), currentEmployee);
 
              // Display success message with receipt details
@@ -443,18 +449,19 @@ public class PosPanel extends JPanel {
              }
              barcode = barcode.trim();
 
-             // Must find item in current inventory for returns in this simplified model
+             // Use the updated findItem - can now find temporary items for return too
              Optional<Item> itemOpt = invService.findItem(barcode);
              if (!itemOpt.isPresent()) {
-                 JOptionPane.showMessageDialog(this, "Item with barcode '" + barcode + "' not found in current inventory.\nCannot process return for unknown items.", "Return Error", JOptionPane.WARNING_MESSAGE);
+                 // If not found in inventory OR temporary store, cannot return.
+                 JOptionPane.showMessageDialog(this, "Item with barcode '" + barcode + "' not found.\nCannot process return for unknown items.", "Return Error", JOptionPane.WARNING_MESSAGE);
                  continue;
              }
-             Item item = itemOpt.get();
+             Item item = itemOpt.get(); // Item could be from inventory OR temporary store
 
              String qtyStr = JOptionPane.showInputDialog(this, "Enter quantity of '" + item.getName() + "' to return:", "Return Quantity", JOptionPane.QUESTION_MESSAGE);
              int quantity;
              try {
-                 if (qtyStr == null) continue;
+                 if (qtyStr == null) continue; // User cancelled quantity input
                  quantity = Integer.parseInt(qtyStr.trim());
                  if (quantity <= 0) throw new NumberFormatException();
              } catch (NumberFormatException ex) {
@@ -462,89 +469,98 @@ public class PosPanel extends JPanel {
                  continue;
              }
 
-             itemsToReturn.add(new TransactionItem(item, quantity));
-             JOptionPane.showMessageDialog(this, quantity + " x '" + item.getName() + "' added to return list.", "Item Added", JOptionPane.INFORMATION_MESSAGE);
+             // Capture the item details (including price) at the time of return lookup
+             // Note: For more accuracy, a real system would look up the price from the *original* receipt.
+            // Here, we use the current price (from inventory or temporary store).
+            itemsToReturn.add(new TransactionItem(item, quantity));
+            JOptionPane.showMessageDialog(this, quantity + " x '" + item.getName() + "' added to return list.", "Item Added", JOptionPane.INFORMATION_MESSAGE);
         }
 
         if (itemsToReturn.isEmpty()) {
-             JOptionPane.showMessageDialog(this, "No items were specified for return.", "Return Cancelled", JOptionPane.INFORMATION_MESSAGE);
+            JOptionPane.showMessageDialog(this, "No items were specified for return.", "Return Cancelled", JOptionPane.INFORMATION_MESSAGE);
             return;
         }
 
         Double customRefundAmount = null;
+        // Calculate refund based on current prices (or prices stored in temporary items)
         double calculatedRefund = itemsToReturn.stream().mapToDouble(TransactionItem::getSubtotal).sum();
 
-         if (currentEmployee instanceof Manager manager && manager.canDoFlexibleRefund()) {
-             int choice = JOptionPane.showConfirmDialog(this,
-                     String.format("Standard calculated refund is $%.2f.\nSpecify a different amount?", calculatedRefund),
-                     "Manager Refund Option",
-                     JOptionPane.YES_NO_OPTION,
-                     JOptionPane.QUESTION_MESSAGE);
+        if (currentEmployee instanceof Manager manager && manager.canDoFlexibleRefund()) {
+            int choice = JOptionPane.showConfirmDialog(this,
+                    String.format("Standard calculated refund is $%.2f.\nSpecify a different amount?", calculatedRefund),
+                    "Manager Refund Option",
+                    JOptionPane.YES_NO_OPTION,
+                    JOptionPane.QUESTION_MESSAGE);
 
-             if (choice == JOptionPane.YES_OPTION) {
-                 String customAmountStr = JOptionPane.showInputDialog(this, "Enter the total custom refund amount:", "Custom Refund Amount", JOptionPane.QUESTION_MESSAGE);
-                 try {
-                     if (customAmountStr != null) {
-                         customRefundAmount = Double.parseDouble(customAmountStr.trim());
-                         if (customRefundAmount < 0) {
-                             JOptionPane.showMessageDialog(this, "Refund amount cannot be negative. Using calculated.", "Input Error", JOptionPane.WARNING_MESSAGE);
-                             customRefundAmount = null;
-                         }
-                     } else {
-                         customRefundAmount = null;
-                     }
-                 } catch (NumberFormatException ex) {
-                     JOptionPane.showMessageDialog(this, "Invalid amount. Using calculated refund.", "Input Error", JOptionPane.WARNING_MESSAGE);
-                     customRefundAmount = null;
-                 }
-             }
-         }
+            if (choice == JOptionPane.YES_OPTION) {
+                String customAmountStr = JOptionPane.showInputDialog(this, "Enter the total custom refund amount:", "Custom Refund Amount", JOptionPane.QUESTION_MESSAGE);
+                try {
+                    if (customAmountStr != null) {
+                        customRefundAmount = Double.parseDouble(customAmountStr.trim());
+                        if (customRefundAmount < 0) {
+                            JOptionPane.showMessageDialog(this, "Refund amount cannot be negative. Using calculated.", "Input Error", JOptionPane.WARNING_MESSAGE);
+                            customRefundAmount = null; // Revert to calculated
+                        }
+                    } // else user cancelled, customRefundAmount remains null
+                } catch (NumberFormatException ex) {
+                    JOptionPane.showMessageDialog(this, "Invalid amount. Using calculated refund.", "Input Error", JOptionPane.WARNING_MESSAGE);
+                    customRefundAmount = null; // Revert to calculated
+                }
+            }
+        }
 
-         TransactionService transService = mainFrame.getTransactionService();
-         try {
-             Receipt returnReceipt = transService.processReturn(originalReceiptId, itemsToReturn, currentEmployee, customRefundAmount);
+        TransactionService transService = mainFrame.getTransactionService();
+        try {
+            // The processReturn method in TransactionService needs modification
+            // to check if an item is temporary before attempting restock.
+            Receipt returnReceipt = transService.processReturn(originalReceiptId, itemsToReturn, currentEmployee, customRefundAmount);
 
-             JTextArea receiptArea = new JTextArea(returnReceipt.getFormattedReceipt());
-             receiptArea.setEditable(false);
-             receiptArea.setFont(new Font("Monospaced", Font.PLAIN, 12));
-             JScrollPane scrollPane = new JScrollPane(receiptArea);
-             scrollPane.setPreferredSize(new Dimension(450, 350));
+            JTextArea receiptArea = new JTextArea(returnReceipt.getFormattedReceipt());
+            receiptArea.setEditable(false);
+            receiptArea.setFont(new Font("Monospaced", Font.PLAIN, 12));
+            JScrollPane scrollPane = new JScrollPane(receiptArea);
+            scrollPane.setPreferredSize(new Dimension(450, 350));
 
-             JOptionPane.showMessageDialog(this, scrollPane, "Return Completed - Return Receipt ID: " + returnReceipt.getReceiptId(), JOptionPane.INFORMATION_MESSAGE);
+            JOptionPane.showMessageDialog(this, scrollPane, "Return Completed - Return Receipt ID: " + returnReceipt.getReceiptId(), JOptionPane.INFORMATION_MESSAGE);
 
          } catch (TransactionService.TransactionException ex) {
-              JOptionPane.showMessageDialog(this, "Error processing return: " + ex.getMessage(), "Return Failed", JOptionPane.ERROR_MESSAGE);
+            JOptionPane.showMessageDialog(this, "Error processing return: " + ex.getMessage(), "Return Failed", JOptionPane.ERROR_MESSAGE);
          } catch (Exception ex) {
-              JOptionPane.showMessageDialog(this, "An unexpected error occurred during return processing:\n" + ex.getMessage(), "System Error", JOptionPane.ERROR_MESSAGE);
-             ex.printStackTrace();
-         }
+            JOptionPane.showMessageDialog(this, "An unexpected error occurred during return processing:\n" + ex.getMessage(), "System Error", JOptionPane.ERROR_MESSAGE);
+            ex.printStackTrace();
+        }
     }
 
-    /** Handles restocking an item (Manager only) */
+    /** Handles restocking an item (Manager only) - Should only apply to inventory items */
     private void restockAction(ActionEvent e) {
-         Employee currentEmployee = mainFrame.getLoggedInEmployee();
-         if (!(currentEmployee instanceof Manager)) {
-             JOptionPane.showMessageDialog(this, "Only Managers have permission to restock items.", "Permission Denied", JOptionPane.ERROR_MESSAGE);
-             return;
-         }
+        Employee currentEmployee = mainFrame.getLoggedInEmployee();
+        if (!(currentEmployee instanceof Manager)) {
+            JOptionPane.showMessageDialog(this, "Only Managers have permission to restock items.", "Permission Denied", JOptionPane.ERROR_MESSAGE);
+            return;
+        }
 
-         String barcode = JOptionPane.showInputDialog(this, "Enter barcode of item to restock:", "Restock Item", JOptionPane.QUESTION_MESSAGE);
-          if (barcode == null || barcode.trim().isEmpty()) return;
-         barcode = barcode.trim();
+        String barcode = JOptionPane.showInputDialog(this, "Enter barcode of INVENTORY item to restock:", "Restock Item", JOptionPane.QUESTION_MESSAGE);
+        if (barcode == null || barcode.trim().isEmpty()) return;
+        barcode = barcode.trim();
 
         InventoryService invService = mainFrame.getInventoryService();
-        Optional<Item> itemOpt = invService.findItem(barcode);
+        // Check specifically if it's an inventory item before proceeding
+        if (!invService.isInventoryItem(barcode)) {
+            if (invService.findItem(barcode).isPresent()) { // Check if it's a known temporary item
+                JOptionPane.showMessageDialog(this, "Item '" + barcode + "' is a temporary item.\nRestocking only applies to main inventory items.", "Restock Error", JOptionPane.WARNING_MESSAGE);
+            } else {
+                JOptionPane.showMessageDialog(this, "Item '" + barcode + "' not found in main inventory.", "Restock Error", JOptionPane.WARNING_MESSAGE);
+                // Optionally offer to add as *new inventory* item here if desired feature
+            }
+            return;
+        }
 
+        // If we reach here, it IS an inventory item. Proceed as before.
+        Optional<Item> itemOpt = invService.findItem(barcode); // Will find the inventory item
+        // This check is now redundant due to isInventoryItem check, but safe to keep
         if (!itemOpt.isPresent()) {
-              int createNew = JOptionPane.showConfirmDialog(this,
-                  "Item '"+barcode+"' not found.\nAdd it as a new item?",
-                  "Item Not Found",
-                  JOptionPane.YES_NO_OPTION);
-
-              if (createNew == JOptionPane.YES_OPTION) {
-                  JOptionPane.showMessageDialog(this, "Add new item functionality (via restock) is not yet implemented.", "Feature Not Available", JOptionPane.INFORMATION_MESSAGE);
-              }
-              return;
+            JOptionPane.showMessageDialog(this, "Error: Item '"+barcode+"' not found despite passing inventory check.", "Internal Error", JOptionPane.ERROR_MESSAGE);
+            return;
         }
 
         Item itemToRestock = itemOpt.get();
@@ -556,67 +572,72 @@ public class PosPanel extends JPanel {
         try {
             int quantityToAdd = Integer.parseInt(qtyStr.trim());
             if (quantityToAdd <= 0) {
-                 JOptionPane.showMessageDialog(this, "Restock quantity must be positive.", "Input Error", JOptionPane.ERROR_MESSAGE);
+                JOptionPane.showMessageDialog(this, "Restock quantity must be positive.", "Input Error", JOptionPane.ERROR_MESSAGE);
                 return;
             }
 
+            // Use the restock method which only affects inventory items
             boolean success = invService.restock(barcode, quantityToAdd, currentEmployee);
 
             if (success) {
-                Optional<Item> updatedItemOpt = invService.findItem(barcode);
+                Optional<Item> updatedItemOpt = invService.findItem(barcode); // Find again to show updated stock
                 String successMsg = "Restocked " + quantityToAdd + " units of '" + itemToRestock.getName() + "'.";
-                if(updatedItemOpt.isPresent()){
+                if(updatedItemOpt.isPresent()){ // Should always be present here
                     successMsg += "\nNew stock level: " + updatedItemOpt.get().getQuantityInStock();
                 }
                 JOptionPane.showMessageDialog(this, successMsg, "Restock Successful", JOptionPane.INFORMATION_MESSAGE);
             } else {
-                 JOptionPane.showMessageDialog(this, "Failed to restock item " + barcode + ". Check logs.", "Restock Failed", JOptionPane.ERROR_MESSAGE);
+                // Failure reason logged by restock method (permission or item vanished)
+                JOptionPane.showMessageDialog(this, "Failed to restock item " + barcode + ". Check logs or permissions.", "Restock Failed", JOptionPane.ERROR_MESSAGE);
             }
 
         } catch (NumberFormatException ex) {
-             JOptionPane.showMessageDialog(this, "Invalid quantity entered.", "Input Error", JOptionPane.ERROR_MESSAGE);
+            JOptionPane.showMessageDialog(this, "Invalid quantity entered.", "Input Error", JOptionPane.ERROR_MESSAGE);
         } catch (Exception ex) {
-             JOptionPane.showMessageDialog(this, "An unexpected error during restock:\n" + ex.getMessage(), "System Error", JOptionPane.ERROR_MESSAGE);
+            JOptionPane.showMessageDialog(this, "An unexpected error during restock:\n" + ex.getMessage(), "System Error", JOptionPane.ERROR_MESSAGE);
             ex.printStackTrace();
         }
     }
 
-    /** Handles checking and displaying low/out-of-stock items */
+    /** Handles checking and displaying low/out-of-stock items (from main inventory) */
     private void checkLowStockAction(ActionEvent e) {
         InventoryService invService = mainFrame.getInventoryService();
+        // These methods only query the main inventory
         List<Item> lowStock = invService.getLowStockItems();
         List<Item> outOfStock = invService.getOutOfStockItems();
 
-        StringBuilder message = new StringBuilder("--- Inventory Stock Levels ---\n\n");
+        StringBuilder message = new StringBuilder("--- Main Inventory Stock Levels ---\n\n");
         int lowStockThreshold = invService.getLowStockThreshold();
 
-         if (!lowStock.isEmpty()) {
-             message.append(String.format("** LOW STOCK ITEMS (<= %d Units) **\n", lowStockThreshold));
-             lowStock.forEach(item -> message.append(String.format("  - %s (%s): %d left\n",
-                     item.getName(), item.getBarcode(), item.getQuantityInStock())));
-         } else {
-             message.append("** No items currently low on stock. **\n");
-         }
+        if (!lowStock.isEmpty()) {
+            message.append(String.format("** LOW STOCK ITEMS (<= %d Units) **\n", lowStockThreshold));
+            lowStock.forEach(item -> message.append(String.format("  - %s (%s): %d left\n",
+                    item.getName(), item.getBarcode(), item.getQuantityInStock())));
+        } else {
+            message.append("** No items currently low on stock in main inventory. **\n");
+        }
 
-         message.append("\n------------------------------------\n\n");
+        message.append("\n------------------------------------\n\n");
 
           if (!outOfStock.isEmpty()) {
-             message.append("** OUT OF STOCK ITEMS **\n");
-             outOfStock.forEach(item -> message.append(String.format("  - %s (%s)\n",
-                     item.getName(), item.getBarcode())));
-         } else {
-             message.append("** No items currently out of stock. **\n");
-         }
+            message.append("** OUT OF STOCK ITEMS (Main Inventory) **\n");
+            outOfStock.forEach(item -> message.append(String.format("  - %s (%s)\n",
+                    item.getName(), item.getBarcode())));
+        } else {
+            message.append("** No items currently out of stock in main inventory. **\n");
+        }
 
-         JTextArea textArea = new JTextArea(message.toString());
-         textArea.setEditable(false);
-         textArea.setWrapStyleWord(true);
-         textArea.setLineWrap(true);
-         textArea.setFont(new Font("Monospaced", Font.PLAIN, 12));
+        // Note: We are not displaying the list of temporary items here, but could be added if needed.
 
-         JScrollPane scrollPane = new JScrollPane(textArea);
-         scrollPane.setPreferredSize(new Dimension(450, 350));
+        JTextArea textArea = new JTextArea(message.toString());
+        textArea.setEditable(false);
+        textArea.setWrapStyleWord(true);
+        textArea.setLineWrap(true);
+        textArea.setFont(new Font("Monospaced", Font.PLAIN, 12));
 
-         JOptionPane.showMessageDialog(this, scrollPane, "Low Stock Report", JOptionPane.INFORMATION_MESSAGE);
+        JScrollPane scrollPane = new JScrollPane(textArea);
+        scrollPane.setPreferredSize(new Dimension(450, 350));
+
+        JOptionPane.showMessageDialog(this, scrollPane, "Low Stock Report (Main Inventory)", JOptionPane.INFORMATION_MESSAGE);
     }
 }

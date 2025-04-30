@@ -7,25 +7,31 @@ import com.pos.model.Manager;
 import com.pos.model.Cashier;
 
 import java.util.List;
+import java.util.Map; // Import Map
 import java.util.Optional;
+import java.util.concurrent.ConcurrentHashMap; // Keep using ConcurrentHashMap for potential future thread safety
 
 // This service acts as a facade and adds business logic around Inventory
 public class InventoryService {
     private final Inventory inventory;
+    // New map to store items added temporarily during the session
+    private final Map<String, Item> temporaryItems;
     // Define the threshold here, ensuring consistency with Inventory's internal logic if applicable.
     // Making it accessible via a getter allows other parts of the app (like UI) to know the value.
     private static final int LOW_STOCK_THRESHOLD = 10;
 
     /**
      * Constructor for InventoryService.
-     * @param inventory The Inventory instance to manage. Must not be null.
-     * @throws IllegalArgumentException if inventory is null.
+     * param inventory The Inventory instance to manage. Must not be null.
+     * throws IllegalArgumentException if inventory is null.
      */
     public InventoryService(Inventory inventory) {
         if (inventory == null) {
-             throw new IllegalArgumentException("Inventory cannot be null.");
+            throw new IllegalArgumentException("Inventory cannot be null.");
         }
         this.inventory = inventory;
+        // Initialize the temporary items map
+        this.temporaryItems = new ConcurrentHashMap<>();
     }
 
     /**
@@ -45,7 +51,7 @@ public class InventoryService {
         List<Item> lowStock = getLowStockItems();
         List<Item> outOfStock = getOutOfStockItems();
         if (!lowStock.isEmpty()) {
-             System.out.println("LOW STOCK WARNINGS:");
+            System.out.println("LOW STOCK WARNINGS:");
             lowStock.forEach(item -> System.out.printf("  - %s (%s): %d left (Threshold <= %d)%n",
                     item.getName(), item.getBarcode(), item.getQuantityInStock(), LOW_STOCK_THRESHOLD));
         }
@@ -59,36 +65,94 @@ public class InventoryService {
         System.out.println("-------------------------------------");
     }
 
-    /** Finds an item by its barcode using the Inventory object. */
+    /**
+     * Finds an item by its barcode, checking both the main inventory and
+     * the session's temporary items.
+     *
+     * param barcode The barcode to search for.
+     * return An Optional containing the Item if found in either inventory or
+     *         temporary storage, otherwise Optional.empty().
+     */
     public Optional<Item> findItem(String barcode) {
-        return inventory.findItemByBarcode(barcode);
+        // 1. Check main inventory first
+        Optional<Item> inventoryItem = inventory.findItemByBarcode(barcode);
+        if (inventoryItem.isPresent()) {
+            return inventoryItem;
+        }
+        // 2. If not in inventory, check temporary items
+        return Optional.ofNullable(temporaryItems.get(barcode));
     }
 
     /**
-     * Processes the sale of an item, decreasing its stock via the Inventory object.
-     * Checks for low stock warning after the sale.
-     * @return true if the sale was successful (stock decreased), false otherwise.
+     * Adds a new item to the temporary storage for the current application session.
+     * These items are not persisted after the application closes and don't affect main inventory stock.
+     *
+     * param item The Item object to add temporarily. Should not be null.
+     * throws IllegalArgumentException if item is null or barcode already exists temporarily.
+     */
+    public void addTemporaryItem(Item item) {
+        if (item == null) {
+            throw new IllegalArgumentException("Cannot add a null temporary item.");
+        }
+        // Optional: Check if barcode conflicts with main inventory (policy decision)
+        // if (inventory.findItemByBarcode(item.getBarcode()).isPresent()) {
+        //    throw new IllegalArgumentException("Cannot add temporary item: Barcode '" + item.getBarcode() + "' already exists in main inventory.");
+        // }
+
+        // Add to temporary map, potentially overwriting if the same barcode was added temporarily before (unlikely but possible)
+        if (temporaryItems.containsKey(item.getBarcode())) {
+            System.out.println("Warning: Overwriting existing item with barcode " + item.getBarcode());
+        }
+        temporaryItems.put(item.getBarcode(), item);
+        System.out.println("Added item: " + item.getBarcode() + " - " + item.getName());
+    }
+
+    /**
+     * Checks if an item with the given barcode exists in the main inventory.
+     *
+     * param barcode The barcode to check.
+     * return true if the item exists in the main inventory, false otherwise (even if it exists temporarily).
+     */
+    public boolean isInventoryItem(String barcode) {
+        return inventory.findItemByBarcode(barcode).isPresent();
+    }
+
+
+    /**
+     * Processes the sale of an item, decreasing its stock via the Inventory object *only*
+     * if the item exists in the main inventory. Does nothing for temporary items.
+     * Checks for low stock warning after the sale if it was an inventory item.
+     * return true if the sale was applicable to an inventory item and stock was decreased,
+     *         true if it was a temporary item (no action needed),
+     *         false if decreasing stock failed for an inventory item.
      */
     public boolean sell(String barcode, int quantity) {
-         // Attempt to decrease stock in the underlying inventory
-         boolean success = inventory.sellItem(barcode, quantity);
-         if(success) {
-             // After successful sale, check if the item is now low stock or out of stock
-             // Use the findItemByBarcode method to get the updated item state for the warning check
-             inventory.findItemByBarcode(barcode).ifPresent(inventory::checkLowStockWarning);
-             // Alternatively, could directly call: inventory.checkLowStockWarning(barcode);
-             // if that method internally finds the item. Using the Optional ensures we check the updated item.
-         }
-         return success;
+        // Check if it's a main inventory item first
+        Optional<Item> inventoryItemOpt = inventory.findItemByBarcode(barcode);
+        if(inventoryItemOpt.isPresent()) {
+            // It's an inventory item, attempt to decrease stock
+            boolean success = inventory.sellItem(barcode, quantity);
+            if(success) {
+                // After successful sale, check if the item is now low stock or out of stock
+                inventory.checkLowStockWarning(barcode); // Use inventory's method directly
+            }
+            return success;
+        } else {
+            // It's either a temporary item or doesn't exist at all.
+            // If it's temporary, no stock action is needed, so consider it "successful" in terms of processing the sale line.
+            // If it doesn't exist, findItem should have caught it earlier, but we return true here as no *inventory* action failed.
+            return true;
+        }
     }
 
     /**
      * Restocks an item, increasing its stock via the Inventory object, subject to employee permissions.
+     * This only applies to items in the main inventory. It will fail for temporary items.
      * Checks for low stock warning after a successful restock.
-     * @param barcode Barcode of the item.
-     * @param quantity Quantity to add (must be positive).
-     * @param employee Employee performing the restock.
-     * @return true if restock was successful, false otherwise (permission denied, item not found, or invalid quantity).
+     * param barcode Barcode of the item (must exist in main inventory).
+     * param quantity Quantity to add (must be positive).
+     * param employee Employee performing the restock.
+     * return true if restock was successful, false otherwise (permission denied, item not found in main inventory, or invalid quantity).
      */
     public boolean restock(String barcode, int quantity, Employee employee) {
         if (quantity <= 0) {
@@ -100,62 +164,56 @@ public class InventoryService {
             return false;
         }
 
-        // Check if the employee has permission using methods on Employee subclasses
-        boolean hasPermission = false;
-        // Use pattern variable binding (Java 16+) for cleaner casting
-        if (employee instanceof Manager manager) {
-            hasPermission = manager.canRestock();
-        } else if (employee instanceof Cashier cashier) {
-             hasPermission = cashier.canRestock(); // Check if Cashiers have permission based on their class definition
-        }
-        // Add checks for other potential roles here if they exist
+        // Check permissions
+        boolean hasPermission = (employee instanceof Manager manager && manager.canRestock()) ||
+                                (employee instanceof Cashier cashier && cashier.canRestock()); // Simplified check
 
-        if (hasPermission) {
-            // Employee has permission, attempt to restock in the inventory
-             boolean success = inventory.restockItem(barcode, quantity);
-              if (!success) {
-                 // Log failure if item wasn't found (restockItem returns false in that case)
-                 System.err.println("Restock failed: Item with barcode '" + barcode + "' not found in inventory.");
-              } else {
-                  // Check stock level after successful restock
-                  System.out.println("Restock successful for item: " + barcode + ", Quantity added: " + quantity);
-                  inventory.findItemByBarcode(barcode).ifPresent(inventory::checkLowStockWarning);
-              }
-             return success; // Return the result of the inventory operation
-        } else {
-            // Log permission denial clearly
+        if (!hasPermission) {
             System.err.println("Permission Denied: Employee " + employee.getEmployeeId() + " (" + employee.getRole() + ") cannot perform restock operations.");
-            return false; // Return false because permission was denied
+            return false;
         }
+
+        // IMPORTANT: Restock only works on main inventory items. restockItem handles the 'not found' check.
+        boolean success = inventory.restockItem(barcode, quantity);
+        if (success) {
+            System.out.println("Restock successful for inventory item: " + barcode + ", Quantity added: " + quantity);
+            inventory.checkLowStockWarning(barcode); // Check stock after successful restock
+        } else {
+            // restockItem logs "not found", so we don't need redundant logging here unless adding detail.
+            System.err.println("Restock failed: Item '" + barcode + "' not found in main inventory or other error occurred.");
+        }
+        return success;
     }
 
-    /** Gets a list of items currently at or below the low stock threshold (but not out of stock) from Inventory. */
+    /** Gets a list of items currently at or below the low stock threshold (but not out of stock) from main Inventory. */
     public List<Item> getLowStockItems() {
         return inventory.getLowStockItems();
     }
 
-    /** Gets a list of items currently out of stock (quantity 0) from Inventory. */
-     public List<Item> getOutOfStockItems() {
+    /** Gets a list of items currently out of stock (quantity 0) from main Inventory. */
+    public List<Item> getOutOfStockItems() {
         return inventory.getOutOfStockItems();
     }
 
-    /** Gets a string indicating the stock status (e.g., "In Stock", "LOW STOCK (5)", "OUT OF STOCK") from Inventory. */
-     public String getStockStatus(String barcode) {
-         return inventory.checkStockLevelStatus(barcode);
-     }
+    /** Gets a string indicating the stock status from main Inventory. Returns "ITEM NOT FOUND" if not in main inventory. */
+    public String getStockStatus(String barcode) {
+        // This method inherently only checks main inventory via inventory.checkStockLevelStatus
+        return inventory.checkStockLevelStatus(barcode);
+    }
 
-    /** Returns a list of all items currently in the inventory by delegating to Inventory. */
-     public List<Item> getAllItems() {
-         return inventory.getAllItems();
-     }
+    /** Returns a list of all items currently in the main inventory by delegating to Inventory. */
+    public List<Item> getAllItems() {
+        // This should probably only return main inventory items for management purposes
+        return inventory.getAllItems();
+    }
 
     /**
      * Returns the defined low stock threshold value used by this service/system.
      * Allows UI or other components to access the threshold consistently.
-     * @return The low stock threshold quantity.
+     * return The low stock threshold quantity.
      */
-     public int getLowStockThreshold() {
+    public int getLowStockThreshold() {
         // Return the value defined in this service.
         return LOW_STOCK_THRESHOLD;
-     }
+    }
 }
